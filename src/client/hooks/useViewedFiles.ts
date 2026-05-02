@@ -1,8 +1,13 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 
-import { type BaseMode, type ViewedFileRecord, type DiffFile } from '../../types/diff';
+import {
+  type BaseMode,
+  type ViewedFileRecord,
+  type DiffFile,
+  type ViewedHashIndexEntry,
+} from '../../types/diff';
 import { getDiffSelectionKey } from '../../utils/diffSelection';
-import { storageService } from '../services/StorageService';
+import { storageService, VIEWED_HASH_VERSION } from '../services/StorageService';
 import { matchesAutoViewedPatterns } from '../utils/autoViewedPatterns';
 import { generateDiffHash, getDiffContentForHashing } from '../utils/diffUtils';
 
@@ -24,6 +29,7 @@ export function useViewedFiles(
   repositoryId?: string,
   autoViewedPatterns: string[] = [],
   baseMode?: BaseMode,
+  keepViewedAcrossComparisons: boolean = true,
 ): UseViewedFilesReturn {
   const [viewedFileRecords, setViewedFileRecords] = useState<ViewedFileRecord[]>([]);
   const [loadedViewedFilesKey, setLoadedViewedFilesKey] = useState<string | null>(null);
@@ -58,55 +64,84 @@ export function useViewedFiles(
     // are not already marked. Pattern changes are intentionally not reactive here
     // so editing the textarea does not immediately re-mark the current diff.
     const processAutoCollapsedFiles = async () => {
+      const additions: ViewedFileRecord[] = [];
+
       if (initialFiles && initialFiles.length > 0) {
-        const autoCollapsedFilesToAdd: ViewedFileRecord[] = [];
+        const knownPaths = new Set(loadedFiles.map((f) => f.filePath));
 
-        // Create a Set of already viewed file paths for quick lookup
-        const viewedPaths = new Set(loadedFiles.map((f) => f.filePath));
+        // Hash every displayed file once so we can both auto-mark and
+        // hydrate-from-index without recomputing.
+        const hashByPath = new Map<string, string>();
+        await Promise.all(
+          initialFiles.map(async (file) => {
+            try {
+              const hash = await generateDiffHash(getDiffContentForHashing(file));
+              hashByPath.set(file.path, hash);
+            } catch (err) {
+              console.error('Failed to generate hash for file:', file.path, err);
+            }
+          }),
+        );
 
-        // Find generated, deleted, or configured files that aren't already marked as viewed
+        // Auto-mark generated / deleted / pattern-matched files.
         for (const file of initialFiles) {
+          if (knownPaths.has(file.path)) continue;
           const shouldAutoMarkViewed =
             file.isGenerated ||
             file.status === 'deleted' ||
             matchesAutoViewedPatterns(file.path, autoViewedPatterns);
+          if (!shouldAutoMarkViewed) continue;
 
-          if (shouldAutoMarkViewed && !viewedPaths.has(file.path)) {
-            try {
-              const content = getDiffContentForHashing(file);
-              const hash = await generateDiffHash(content);
+          const hash = hashByPath.get(file.path);
+          if (!hash) continue;
 
-              const newRecord: ViewedFileRecord = {
-                filePath: file.path,
-                viewedAt: new Date().toISOString(),
-                diffContentHash: hash,
-              };
-
-              autoCollapsedFilesToAdd.push(newRecord);
-            } catch (err) {
-              console.error('Failed to generate hash for auto-collapsed file:', err);
-            }
-          }
+          additions.push({
+            filePath: file.path,
+            viewedAt: new Date().toISOString(),
+            diffContentHash: hash,
+          });
+          knownPaths.add(file.path);
         }
 
-        // Add all auto-collapsed files to storage at once
-        if (autoCollapsedFilesToAdd.length > 0) {
-          const updatedRecords = [...loadedFiles, ...autoCollapsedFilesToAdd];
-          storageService.saveViewedFiles(
-            baseCommitish,
-            targetCommitish,
-            updatedRecords,
-            currentCommitHash,
-            branchToHash,
-            repositoryId,
-            baseMode,
-          );
-          if (!cancelled) {
-            setViewedFileRecords(updatedRecords);
-            setLoadedViewedFilesKey(viewedFilesKey);
+        // Hydrate from the per-repository hash index so files that were marked
+        // viewed in a prior comparison stay viewed when their diff is unchanged.
+        if (keepViewedAcrossComparisons) {
+          const index = storageService.getViewedHashIndex(repositoryId);
+          const indexed = new Map(index.entries.map((entry) => [entry.filePath, entry]));
+          for (const file of initialFiles) {
+            if (knownPaths.has(file.path)) continue;
+            const entry = indexed.get(file.path);
+            if (!entry || entry.hashVersion !== VIEWED_HASH_VERSION) continue;
+
+            const currentHash = hashByPath.get(file.path);
+            if (!currentHash || currentHash !== entry.diffContentHash) continue;
+
+            additions.push({
+              filePath: file.path,
+              viewedAt: entry.viewedAt, // preserve original timestamp
+              diffContentHash: currentHash,
+            });
+            knownPaths.add(file.path);
           }
-          return;
         }
+      }
+
+      if (additions.length > 0) {
+        const updatedRecords = [...loadedFiles, ...additions];
+        storageService.saveViewedFiles(
+          baseCommitish,
+          targetCommitish,
+          updatedRecords,
+          currentCommitHash,
+          branchToHash,
+          repositoryId,
+          baseMode,
+        );
+        if (!cancelled) {
+          setViewedFileRecords(updatedRecords);
+          setLoadedViewedFilesKey(viewedFilesKey);
+        }
+        return;
       }
 
       if (!cancelled) {
@@ -128,6 +163,7 @@ export function useViewedFiles(
     repositoryId,
     viewedFilesKey,
     baseMode,
+    keepViewedAcrossComparisons,
   ]); // initialFiles and autoViewedPatterns intentionally omitted to run only on diff init
 
   // Save viewed files to storage
@@ -198,27 +234,40 @@ export function useViewedFiles(
         // File is already viewed, remove it
         const newRecords = viewedFileRecords.filter((r) => r.filePath !== filePath);
         saveViewedFiles(newRecords);
+        // Drop from the cross-comparison index so it doesn't get auto-restored
+        // the next time the user changes commit ranges.
+        storageService.removeViewedHashes(repositoryId, [filePath]);
       } else {
         // File is not viewed, add it
         const hash = await getFileHash(diffFile);
+        const viewedAt = new Date().toISOString();
         const newRecord: ViewedFileRecord = {
           filePath,
-          viewedAt: new Date().toISOString(),
+          viewedAt,
           diffContentHash: hash,
         };
 
         const newRecords = [...viewedFileRecords, newRecord];
         saveViewedFiles(newRecords);
+
+        const indexEntry: ViewedHashIndexEntry = {
+          filePath,
+          diffContentHash: hash,
+          hashVersion: VIEWED_HASH_VERSION,
+          viewedAt,
+        };
+        storageService.recordViewedHashes(repositoryId, [indexEntry]);
       }
     },
-    [viewedFileRecords, getViewedFileRecord, getFileHash, saveViewedFiles],
+    [viewedFileRecords, getViewedFileRecord, getFileHash, saveViewedFiles, repositoryId],
   );
 
   // Clear all viewed files
   const clearViewedFiles = useCallback(() => {
     saveViewedFiles([]);
     setFileHashes(new Map());
-  }, [saveViewedFiles]);
+    storageService.clearViewedHashIndex(repositoryId);
+  }, [saveViewedFiles, repositoryId]);
 
   return {
     viewedFiles,

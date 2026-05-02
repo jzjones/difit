@@ -8,6 +8,7 @@ import { useViewedFiles } from './useViewedFiles';
 const mockStorage = new Map<string, any>();
 
 vi.mock('../services/StorageService', () => ({
+  VIEWED_HASH_VERSION: 1,
   storageService: {
     getCommentThreads: vi.fn((base, target, _hash, _branch, repoId) => {
       const key = `${repoId || 'default'}-${base}-${target}-threads`;
@@ -32,6 +33,48 @@ vi.mock('../services/StorageService', () => ({
     saveViewedFiles: vi.fn((base, target, files, _hash, _branch, repoId) => {
       const key = `${repoId || 'default'}-${base}-${target}-viewed`;
       mockStorage.set(key, files);
+    }),
+    getViewedHashIndex: vi.fn((repoId) => {
+      const key = `${repoId || 'default'}-viewed-hash-index`;
+      return (
+        mockStorage.get(key) || {
+          version: 1,
+          lastModifiedAt: new Date(0).toISOString(),
+          entries: [],
+        }
+      );
+    }),
+    recordViewedHashes: vi.fn((repoId, entries) => {
+      const key = `${repoId || 'default'}-viewed-hash-index`;
+      const existing = mockStorage.get(key) || {
+        version: 1,
+        lastModifiedAt: new Date(0).toISOString(),
+        entries: [],
+      };
+      const byPath = new Map(
+        existing.entries.map((entry: { filePath: string }) => [entry.filePath, entry]),
+      );
+      for (const entry of entries) byPath.set(entry.filePath, entry);
+      mockStorage.set(key, {
+        version: 1,
+        lastModifiedAt: new Date().toISOString(),
+        entries: Array.from(byPath.values()),
+      });
+    }),
+    removeViewedHashes: vi.fn((repoId, filePaths) => {
+      const key = `${repoId || 'default'}-viewed-hash-index`;
+      const existing = mockStorage.get(key);
+      if (!existing) return;
+      const drop = new Set(filePaths);
+      mockStorage.set(key, {
+        ...existing,
+        entries: existing.entries.filter(
+          (entry: { filePath: string }) => !drop.has(entry.filePath),
+        ),
+      });
+    }),
+    clearViewedHashIndex: vi.fn((repoId) => {
+      mockStorage.delete(`${repoId || 'default'}-viewed-hash-index`);
     }),
     getDiffContextData: vi.fn(() => null),
     saveDiffContextData: vi.fn(),

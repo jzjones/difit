@@ -26,6 +26,7 @@ const baseSettings = {
   editor: 'cursor' as const,
   colorVision: 'normal' as const,
   autoViewedPatterns: [],
+  keepViewedAcrossComparisons: true,
 };
 
 describe('SettingsModal', () => {
@@ -111,6 +112,32 @@ describe('SettingsModal', () => {
     expect(onSettingsChange).toHaveBeenLastCalledWith({
       ...baseSettings,
       autoViewedPatterns: ['*.test.ts', 'src/generated/**'],
+    });
+  });
+
+  it('toggles the "keep viewed across comparisons" setting from the system section', () => {
+    const onSettingsChange = vi.fn();
+
+    render(
+      <SettingsModal
+        isOpen={true}
+        onClose={vi.fn()}
+        settings={baseSettings}
+        onSettingsChange={onSettingsChange}
+      />,
+      { wrapper },
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /^System/ }));
+
+    const checkbox = screen.getByLabelText(/Keep files marked viewed when their diff is unchanged/);
+    expect(checkbox).toBeChecked();
+
+    fireEvent.click(checkbox);
+
+    expect(onSettingsChange).toHaveBeenLastCalledWith({
+      ...baseSettings,
+      keepViewedAcrossComparisons: false,
     });
   });
 });

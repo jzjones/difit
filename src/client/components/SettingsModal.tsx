@@ -20,6 +20,7 @@ interface AppearanceSettings {
   editor: EditorOptionId;
   colorVision: ColorVisionMode;
   autoViewedPatterns: string[];
+  keepViewedAcrossComparisons: boolean;
 }
 
 interface SettingsModalProps {
@@ -40,6 +41,7 @@ const DEFAULT_SETTINGS: AppearanceSettings = {
   editor: DEFAULT_EDITOR_ID,
   colorVision: 'normal',
   autoViewedPatterns: [],
+  keepViewedAcrossComparisons: true,
 };
 
 const FONT_FAMILIES = [
@@ -152,6 +154,7 @@ export function SettingsModal({ isOpen, onClose, settings, onSettingsChange }: S
       ...settings,
       editor: DEFAULT_SETTINGS.editor,
       autoViewedPatterns: DEFAULT_SETTINGS.autoViewedPatterns,
+      keepViewedAcrossComparisons: DEFAULT_SETTINGS.keepViewedAcrossComparisons,
     });
     setAutoViewedPatternsInput(formatAutoViewedPatterns(DEFAULT_SETTINGS.autoViewedPatterns));
   };
@@ -349,6 +352,35 @@ export function SettingsModal({ isOpen, onClose, settings, onSettingsChange }: S
                       </option>
                     ))}
                   </select>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="keep-viewed-across-comparisons"
+                    className="flex items-start gap-3 cursor-pointer"
+                  >
+                    <input
+                      id="keep-viewed-across-comparisons"
+                      type="checkbox"
+                      checked={settings.keepViewedAcrossComparisons}
+                      onChange={(e) =>
+                        onSettingsChange({
+                          ...settings,
+                          keepViewedAcrossComparisons: e.target.checked,
+                        })
+                      }
+                      className="mt-0.5 accent-github-accent"
+                    />
+                    <span className="flex-1">
+                      <span className="block text-sm font-medium text-github-text-primary">
+                        Keep files marked viewed when their diff is unchanged
+                      </span>
+                      <span className="block text-sm text-github-text-secondary mt-1">
+                        When you change the comparison range or add commits, files whose diff is
+                        unchanged stay marked as viewed.
+                      </span>
+                    </span>
+                  </label>
                 </div>
 
                 <div>

@@ -321,3 +321,120 @@ describe('StorageService - Repository Isolation', () => {
     });
   });
 });
+
+describe('StorageService - Viewed Hash Index', () => {
+  let service: StorageService;
+
+  beforeEach(() => {
+    localStorage.clear();
+    service = new StorageService();
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+  });
+
+  it('returns an empty index when nothing is stored', () => {
+    const index = service.getViewedHashIndex('repo-1');
+    expect(index.entries).toEqual([]);
+    expect(index.version).toBe(1);
+  });
+
+  it('upserts entries and reads them back', () => {
+    service.recordViewedHashes('repo-1', [
+      { filePath: 'a.ts', diffContentHash: 'h1', hashVersion: 1, viewedAt: '2026-01-01T00:00:00Z' },
+      { filePath: 'b.ts', diffContentHash: 'h2', hashVersion: 1, viewedAt: '2026-01-01T00:00:01Z' },
+    ]);
+
+    const index = service.getViewedHashIndex('repo-1');
+    expect(index.entries.map((e) => e.filePath).sort()).toEqual(['a.ts', 'b.ts']);
+
+    service.recordViewedHashes('repo-1', [
+      {
+        filePath: 'a.ts',
+        diffContentHash: 'h1-new',
+        hashVersion: 1,
+        viewedAt: '2026-01-02T00:00:00Z',
+      },
+    ]);
+    const refreshed = service.getViewedHashIndex('repo-1');
+    const a = refreshed.entries.find((e) => e.filePath === 'a.ts');
+    expect(a?.diffContentHash).toBe('h1-new');
+    expect(refreshed.entries).toHaveLength(2);
+  });
+
+  it('isolates the index per repositoryId', () => {
+    service.recordViewedHashes('repo-1', [
+      { filePath: 'a.ts', diffContentHash: 'h1', hashVersion: 1, viewedAt: '2026-01-01T00:00:00Z' },
+    ]);
+    service.recordViewedHashes('repo-2', [
+      {
+        filePath: 'a.ts',
+        diffContentHash: 'other',
+        hashVersion: 1,
+        viewedAt: '2026-01-01T00:00:00Z',
+      },
+    ]);
+
+    expect(service.getViewedHashIndex('repo-1').entries[0]!.diffContentHash).toBe('h1');
+    expect(service.getViewedHashIndex('repo-2').entries[0]!.diffContentHash).toBe('other');
+  });
+
+  it('removes entries by file path', () => {
+    service.recordViewedHashes('repo-1', [
+      { filePath: 'a.ts', diffContentHash: 'h1', hashVersion: 1, viewedAt: '2026-01-01T00:00:00Z' },
+      { filePath: 'b.ts', diffContentHash: 'h2', hashVersion: 1, viewedAt: '2026-01-01T00:00:01Z' },
+    ]);
+
+    service.removeViewedHashes('repo-1', ['a.ts']);
+    const remaining = service.getViewedHashIndex('repo-1').entries.map((e) => e.filePath);
+    expect(remaining).toEqual(['b.ts']);
+  });
+
+  it('clearViewedHashIndex empties only the targeted repository', () => {
+    service.recordViewedHashes('repo-1', [
+      { filePath: 'a.ts', diffContentHash: 'h1', hashVersion: 1, viewedAt: '2026-01-01T00:00:00Z' },
+    ]);
+    service.recordViewedHashes('repo-2', [
+      { filePath: 'a.ts', diffContentHash: 'h1', hashVersion: 1, viewedAt: '2026-01-01T00:00:00Z' },
+    ]);
+
+    service.clearViewedHashIndex('repo-1');
+    expect(service.getViewedHashIndex('repo-1').entries).toEqual([]);
+    expect(service.getViewedHashIndex('repo-2').entries).toHaveLength(1);
+  });
+
+  it('trims to the LRU cap, dropping the oldest entries by viewedAt', () => {
+    const entries = Array.from({ length: 5005 }, (_, i) => ({
+      filePath: `file-${i}.ts`,
+      diffContentHash: `h${i}`,
+      hashVersion: 1 as const,
+      // Lower index → older timestamp.
+      viewedAt: new Date(2000 + i).toISOString(),
+    }));
+    service.recordViewedHashes('repo-1', entries);
+
+    const stored = service.getViewedHashIndex('repo-1');
+    expect(stored.entries.length).toBe(5000);
+    // The five oldest entries should have been dropped.
+    const paths = new Set(stored.entries.map((e) => e.filePath));
+    for (let i = 0; i < 5; i++) {
+      expect(paths.has(`file-${i}.ts`)).toBe(false);
+    }
+    expect(paths.has('file-5004.ts')).toBe(true);
+  });
+
+  it('cleanupOldData removes stale index entries alongside context entries', () => {
+    service.recordViewedHashes('repo-1', [
+      { filePath: 'a.ts', diffContentHash: 'h1', hashVersion: 1, viewedAt: '2020-01-01T00:00:00Z' },
+    ]);
+    // Force the index's lastModifiedAt to look ancient.
+    const key = 'difit-viewed-index-v1/repo-1';
+    const raw = JSON.parse(localStorage.getItem(key) ?? '{}');
+    raw.lastModifiedAt = '2020-01-01T00:00:00Z';
+    localStorage.setItem(key, JSON.stringify(raw));
+
+    service.cleanupOldData(30);
+    expect(localStorage.getItem(key)).toBeNull();
+  });
+});
