@@ -21,7 +21,6 @@ const DEFAULT_SETTINGS: AppearanceSettings = {
   editor: DEFAULT_EDITOR_ID,
   colorVision: 'normal',
   autoViewedPatterns: [],
-  keepViewedAcrossComparisons: true,
 };
 
 export function useAppearanceSettings() {

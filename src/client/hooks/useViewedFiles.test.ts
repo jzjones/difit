@@ -24,7 +24,10 @@ const mockRecordViewedHashes = vi.fn(
   (_repositoryId: string | undefined, _entries: ViewedHashIndexEntry[]) => {},
 );
 const mockRemoveViewedHashes = vi.fn(
-  (_repositoryId: string | undefined, _filePaths: string[]) => {},
+  (
+    _repositoryId: string | undefined,
+    _entries: Array<{ filePath: string; diffContentHash: string }>,
+  ) => {},
 );
 const mockClearViewedHashIndex = vi.fn((_repositoryId?: string) => {});
 
@@ -36,8 +39,10 @@ vi.mock('../services/StorageService', () => ({
     getViewedHashIndex: (repositoryId?: string) => mockGetViewedHashIndex(repositoryId),
     recordViewedHashes: (repositoryId: string | undefined, entries: ViewedHashIndexEntry[]) =>
       mockRecordViewedHashes(repositoryId, entries),
-    removeViewedHashes: (repositoryId: string | undefined, filePaths: string[]) =>
-      mockRemoveViewedHashes(repositoryId, filePaths),
+    removeViewedHashes: (
+      repositoryId: string | undefined,
+      entries: Array<{ filePath: string; diffContentHash: string }>,
+    ) => mockRemoveViewedHashes(repositoryId, entries),
     clearViewedHashIndex: (repositoryId?: string) => mockClearViewedHashIndex(repositoryId),
   },
 }));
@@ -406,17 +411,7 @@ describe('useViewedFiles', () => {
       });
 
       const { result } = renderHook(() =>
-        useViewedFiles(
-          'main',
-          'HEAD',
-          'newhead',
-          undefined,
-          initialFiles,
-          'repo-1',
-          [],
-          undefined,
-          true,
-        ),
+        useViewedFiles('main', 'HEAD', 'newhead', undefined, initialFiles, 'repo-1', [], undefined),
       );
 
       await waitFor(() => {
@@ -425,15 +420,47 @@ describe('useViewedFiles', () => {
       expect(result.current.viewedFiles.has('src/changed.ts')).toBe(false);
     });
 
-    it('does not hydrate from the index when the setting is disabled', async () => {
-      const initialFiles: DiffFile[] = [createMockDiffFile('src/unchanged.ts', 'modified', false)];
+    it('restores from the matching (path, hash) entry when the index has multiple hashes for the same path', async () => {
+      const initialFiles: DiffFile[] = [createMockDiffFile('src/foo.ts', 'modified', false)];
+      mockGetViewedHashIndex.mockReturnValue({
+        version: 1,
+        lastModifiedAt: new Date().toISOString(),
+        entries: [
+          // A stale entry from a different comparison range (same path, different hash).
+          {
+            filePath: 'src/foo.ts',
+            diffContentHash: 'some-other-hash',
+            hashVersion: 1,
+            viewedAt: '2026-01-01T00:00:00Z',
+          },
+          // The matching entry for the current diff.
+          {
+            filePath: 'src/foo.ts',
+            diffContentHash: hashFor('src/foo.ts', 'modified'),
+            hashVersion: 1,
+            viewedAt: '2026-01-02T00:00:00Z',
+          },
+        ],
+      });
+
+      const { result } = renderHook(() =>
+        useViewedFiles('main', 'HEAD', 'newhead', undefined, initialFiles, 'repo-1', [], undefined),
+      );
+
+      await waitFor(() => {
+        expect(result.current.viewedFiles.has('src/foo.ts')).toBe(true);
+      });
+    });
+
+    it('does not hydrate when the index only contains entries for other hashes of this path', async () => {
+      const initialFiles: DiffFile[] = [createMockDiffFile('src/foo.ts', 'modified', false)];
       mockGetViewedHashIndex.mockReturnValue({
         version: 1,
         lastModifiedAt: new Date().toISOString(),
         entries: [
           {
-            filePath: 'src/unchanged.ts',
-            diffContentHash: hashFor('src/unchanged.ts', 'modified'),
+            filePath: 'src/foo.ts',
+            diffContentHash: 'hash-from-different-comparison',
             hashVersion: 1,
             viewedAt: '2026-01-01T00:00:00Z',
           },
@@ -441,24 +468,13 @@ describe('useViewedFiles', () => {
       });
 
       const { result } = renderHook(() =>
-        useViewedFiles(
-          'main',
-          'HEAD',
-          'newhead',
-          undefined,
-          initialFiles,
-          'repo-1',
-          [],
-          undefined,
-          false,
-        ),
+        useViewedFiles('main', 'HEAD', 'newhead', undefined, initialFiles, 'repo-1', [], undefined),
       );
 
       await waitFor(() => {
-        // Hook has settled — saveViewedFiles wouldn't fire because nothing was added.
         expect(mockGetViewedFiles).toHaveBeenCalled();
       });
-      expect(result.current.viewedFiles.has('src/unchanged.ts')).toBe(false);
+      expect(result.current.viewedFiles.has('src/foo.ts')).toBe(false);
     });
 
     it('ignores index entries with a stale hashVersion', async () => {
@@ -478,17 +494,7 @@ describe('useViewedFiles', () => {
       });
 
       const { result } = renderHook(() =>
-        useViewedFiles(
-          'main',
-          'HEAD',
-          'newhead',
-          undefined,
-          initialFiles,
-          'repo-1',
-          [],
-          undefined,
-          true,
-        ),
+        useViewedFiles('main', 'HEAD', 'newhead', undefined, initialFiles, 'repo-1', [], undefined),
       );
 
       await waitFor(() => {
@@ -500,7 +506,7 @@ describe('useViewedFiles', () => {
     it('writes to the index when toggling a file viewed', async () => {
       const file = createMockDiffFile('src/foo.ts', 'modified', false);
       const { result } = renderHook(() =>
-        useViewedFiles('main', 'HEAD', 'abc', undefined, [file], 'repo-1', [], undefined, true),
+        useViewedFiles('main', 'HEAD', 'abc', undefined, [file], 'repo-1', [], undefined),
       );
 
       await waitFor(() => {
@@ -533,7 +539,7 @@ describe('useViewedFiles', () => {
       ]);
 
       const { result } = renderHook(() =>
-        useViewedFiles('main', 'HEAD', 'abc', undefined, [file], 'repo-1', [], undefined, true),
+        useViewedFiles('main', 'HEAD', 'abc', undefined, [file], 'repo-1', [], undefined),
       );
 
       await waitFor(() => {
@@ -544,12 +550,54 @@ describe('useViewedFiles', () => {
         await result.current.toggleFileViewed('src/foo.ts', file);
       });
 
-      expect(mockRemoveViewedHashes).toHaveBeenCalledWith('repo-1', ['src/foo.ts']);
+      expect(mockRemoveViewedHashes).toHaveBeenCalledWith('repo-1', [
+        { filePath: 'src/foo.ts', diffContentHash: hashFor('src/foo.ts', 'modified') },
+      ]);
+    });
+
+    it('flags files as changedSinceViewed when a prior view exists with a different hash', async () => {
+      const initialFiles: DiffFile[] = [
+        createMockDiffFile('src/changed.ts', 'modified', false),
+        createMockDiffFile('src/never-viewed.ts', 'modified', false),
+        createMockDiffFile('src/unchanged.ts', 'modified', false),
+      ];
+      mockGetViewedHashIndex.mockReturnValue({
+        version: 1,
+        lastModifiedAt: new Date().toISOString(),
+        entries: [
+          // Prior view of src/changed.ts had a different hash than the current diff.
+          {
+            filePath: 'src/changed.ts',
+            diffContentHash: 'old-hash',
+            hashVersion: 1,
+            viewedAt: '2026-01-01T00:00:00Z',
+          },
+          // Prior view of src/unchanged.ts matches the current hash, so it gets hydrated, not flagged.
+          {
+            filePath: 'src/unchanged.ts',
+            diffContentHash: hashFor('src/unchanged.ts', 'modified'),
+            hashVersion: 1,
+            viewedAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+      });
+
+      const { result } = renderHook(() =>
+        useViewedFiles('main', 'HEAD', 'newhead', undefined, initialFiles, 'repo-1', [], undefined),
+      );
+
+      await waitFor(() => {
+        expect(result.current.viewedFiles.has('src/unchanged.ts')).toBe(true);
+      });
+
+      expect(result.current.changedSinceViewedFiles.has('src/changed.ts')).toBe(true);
+      expect(result.current.changedSinceViewedFiles.has('src/never-viewed.ts')).toBe(false);
+      expect(result.current.changedSinceViewedFiles.has('src/unchanged.ts')).toBe(false);
     });
 
     it('clearViewedFiles also clears the per-repo index', async () => {
       const { result } = renderHook(() =>
-        useViewedFiles('main', 'HEAD', 'abc', undefined, [], 'repo-1', [], undefined, true),
+        useViewedFiles('main', 'HEAD', 'abc', undefined, [], 'repo-1', [], undefined),
       );
 
       await waitFor(() => {

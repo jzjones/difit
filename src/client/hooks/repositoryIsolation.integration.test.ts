@@ -51,28 +51,36 @@ vi.mock('../services/StorageService', () => ({
         lastModifiedAt: new Date(0).toISOString(),
         entries: [],
       };
-      const byPath = new Map(
-        existing.entries.map((entry: { filePath: string }) => [entry.filePath, entry]),
+      const compositeKey = (e: { filePath: string; diffContentHash: string }) =>
+        `${e.filePath} ${e.diffContentHash}`;
+      const byKey = new Map(
+        existing.entries.map((entry: { filePath: string; diffContentHash: string }) => [
+          compositeKey(entry),
+          entry,
+        ]),
       );
-      for (const entry of entries) byPath.set(entry.filePath, entry);
+      for (const entry of entries) byKey.set(compositeKey(entry), entry);
       mockStorage.set(key, {
         version: 1,
         lastModifiedAt: new Date().toISOString(),
-        entries: Array.from(byPath.values()),
+        entries: Array.from(byKey.values()),
       });
     }),
-    removeViewedHashes: vi.fn((repoId, filePaths) => {
-      const key = `${repoId || 'default'}-viewed-hash-index`;
-      const existing = mockStorage.get(key);
-      if (!existing) return;
-      const drop = new Set(filePaths);
-      mockStorage.set(key, {
-        ...existing,
-        entries: existing.entries.filter(
-          (entry: { filePath: string }) => !drop.has(entry.filePath),
-        ),
-      });
-    }),
+    removeViewedHashes: vi.fn(
+      (repoId, entries: Array<{ filePath: string; diffContentHash: string }>) => {
+        const key = `${repoId || 'default'}-viewed-hash-index`;
+        const existing = mockStorage.get(key);
+        if (!existing) return;
+        const drop = new Set(entries.map((e) => `${e.filePath} ${e.diffContentHash}`));
+        mockStorage.set(key, {
+          ...existing,
+          entries: existing.entries.filter(
+            (entry: { filePath: string; diffContentHash: string }) =>
+              !drop.has(`${entry.filePath} ${entry.diffContentHash}`),
+          ),
+        });
+      },
+    ),
     clearViewedHashIndex: vi.fn((repoId) => {
       mockStorage.delete(`${repoId || 'default'}-viewed-hash-index`);
     }),

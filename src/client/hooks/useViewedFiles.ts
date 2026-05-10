@@ -13,6 +13,13 @@ import { generateDiffHash, getDiffContentForHashing } from '../utils/diffUtils';
 
 interface UseViewedFilesReturn {
   viewedFiles: Set<string>; // Set of file paths
+  /**
+   * Set of file paths that were marked viewed in some prior comparison range
+   * (per the per-repo hash index) but whose current diff hash does not match
+   * any of those prior views. Used to surface a "changed since you viewed"
+   * indicator for incremental code reviews.
+   */
+  changedSinceViewedFiles: Set<string>;
   hasLoadedInitialViewedFiles: boolean;
   toggleFileViewed: (filePath: string, diffFile: DiffFile) => Promise<void>;
   isFileContentChanged: (filePath: string, diffFile: DiffFile) => Promise<boolean>;
@@ -29,11 +36,11 @@ export function useViewedFiles(
   repositoryId?: string,
   autoViewedPatterns: string[] = [],
   baseMode?: BaseMode,
-  keepViewedAcrossComparisons: boolean = true,
 ): UseViewedFilesReturn {
   const [viewedFileRecords, setViewedFileRecords] = useState<ViewedFileRecord[]>([]);
   const [loadedViewedFilesKey, setLoadedViewedFilesKey] = useState<string | null>(null);
   const [fileHashes, setFileHashes] = useState<Map<string, string>>(new Map());
+  const [changedSinceViewedFiles, setChangedSinceViewedFiles] = useState<Set<string>>(new Set());
   const viewedFilesKey =
     baseCommitish && targetCommitish
       ? `${repositoryId ?? 'default'}:${getDiffSelectionKey({
@@ -103,27 +110,48 @@ export function useViewedFiles(
           knownPaths.add(file.path);
         }
 
-        // Hydrate from the per-repository hash index so files that were marked
-        // viewed in a prior comparison stay viewed when their diff is unchanged.
-        if (keepViewedAcrossComparisons) {
-          const index = storageService.getViewedHashIndex(repositoryId);
-          const indexed = new Map(index.entries.map((entry) => [entry.filePath, entry]));
-          for (const file of initialFiles) {
-            if (knownPaths.has(file.path)) continue;
-            const entry = indexed.get(file.path);
-            if (!entry || entry.hashVersion !== VIEWED_HASH_VERSION) continue;
-
-            const currentHash = hashByPath.get(file.path);
-            if (!currentHash || currentHash !== entry.diffContentHash) continue;
-
-            additions.push({
-              filePath: file.path,
-              viewedAt: entry.viewedAt, // preserve original timestamp
-              diffContentHash: currentHash,
-            });
-            knownPaths.add(file.path);
-          }
+        // Build per-path lookups from the per-repository hash index. Entries
+        // are keyed by (filePath, diffContentHash) so the same file can hold
+        // independent viewed state across multiple comparison ranges.
+        const index = storageService.getViewedHashIndex(repositoryId);
+        const indexedByKey = new Map<string, (typeof index.entries)[number]>();
+        const indexedPaths = new Set<string>();
+        for (const entry of index.entries) {
+          if (entry.hashVersion !== VIEWED_HASH_VERSION) continue;
+          indexedByKey.set(`${entry.filePath} ${entry.diffContentHash}`, entry);
+          indexedPaths.add(entry.filePath);
         }
+
+        // Hydrate viewed state for files whose current diff matches a prior view.
+        for (const file of initialFiles) {
+          if (knownPaths.has(file.path)) continue;
+          const currentHash = hashByPath.get(file.path);
+          if (!currentHash) continue;
+          const entry = indexedByKey.get(`${file.path} ${currentHash}`);
+          if (!entry) continue;
+
+          additions.push({
+            filePath: file.path,
+            viewedAt: entry.viewedAt, // preserve original timestamp
+            diffContentHash: currentHash,
+          });
+          knownPaths.add(file.path);
+        }
+
+        // Flag files that were viewed in some prior comparison but whose
+        // current diff differs from every recorded hash for that path.
+        const changed = new Set<string>();
+        for (const file of initialFiles) {
+          if (!indexedPaths.has(file.path)) continue;
+          if (knownPaths.has(file.path)) continue; // already viewed (loaded or just hydrated)
+          const currentHash = hashByPath.get(file.path);
+          if (!currentHash) continue;
+          if (indexedByKey.has(`${file.path} ${currentHash}`)) continue;
+          changed.add(file.path);
+        }
+        if (!cancelled) setChangedSinceViewedFiles(changed);
+      } else {
+        if (!cancelled) setChangedSinceViewedFiles(new Set());
       }
 
       if (additions.length > 0) {
@@ -163,7 +191,6 @@ export function useViewedFiles(
     repositoryId,
     viewedFilesKey,
     baseMode,
-    keepViewedAcrossComparisons,
   ]); // initialFiles and autoViewedPatterns intentionally omitted to run only on diff init
 
   // Save viewed files to storage
@@ -234,9 +261,11 @@ export function useViewedFiles(
         // File is already viewed, remove it
         const newRecords = viewedFileRecords.filter((r) => r.filePath !== filePath);
         saveViewedFiles(newRecords);
-        // Drop from the cross-comparison index so it doesn't get auto-restored
-        // the next time the user changes commit ranges.
-        storageService.removeViewedHashes(repositoryId, [filePath]);
+        // Drop only the matching (path, hash) entry from the cross-comparison
+        // index, so the same file viewed in other comparisons keeps its state.
+        storageService.removeViewedHashes(repositoryId, [
+          { filePath, diffContentHash: existingRecord.diffContentHash },
+        ]);
       } else {
         // File is not viewed, add it
         const hash = await getFileHash(diffFile);
@@ -266,11 +295,13 @@ export function useViewedFiles(
   const clearViewedFiles = useCallback(() => {
     saveViewedFiles([]);
     setFileHashes(new Map());
+    setChangedSinceViewedFiles(new Set());
     storageService.clearViewedHashIndex(repositoryId);
   }, [saveViewedFiles, repositoryId]);
 
   return {
     viewedFiles,
+    changedSinceViewedFiles,
     hasLoadedInitialViewedFiles,
     toggleFileViewed,
     isFileContentChanged,

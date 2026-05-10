@@ -349,18 +349,25 @@ describe('StorageService - Viewed Hash Index', () => {
     const index = service.getViewedHashIndex('repo-1');
     expect(index.entries.map((e) => e.filePath).sort()).toEqual(['a.ts', 'b.ts']);
 
+    // Re-recording the same (filePath, hash) pair updates viewedAt rather than duplicating.
     service.recordViewedHashes('repo-1', [
-      {
-        filePath: 'a.ts',
-        diffContentHash: 'h1-new',
-        hashVersion: 1,
-        viewedAt: '2026-01-02T00:00:00Z',
-      },
+      { filePath: 'a.ts', diffContentHash: 'h1', hashVersion: 1, viewedAt: '2026-01-02T00:00:00Z' },
     ]);
     const refreshed = service.getViewedHashIndex('repo-1');
     const a = refreshed.entries.find((e) => e.filePath === 'a.ts');
-    expect(a?.diffContentHash).toBe('h1-new');
+    expect(a?.viewedAt).toBe('2026-01-02T00:00:00Z');
     expect(refreshed.entries).toHaveLength(2);
+  });
+
+  it('keeps independent entries for the same filePath with different hashes', () => {
+    service.recordViewedHashes('repo-1', [
+      { filePath: 'a.ts', diffContentHash: 'h1', hashVersion: 1, viewedAt: '2026-01-01T00:00:00Z' },
+      { filePath: 'a.ts', diffContentHash: 'h2', hashVersion: 1, viewedAt: '2026-01-02T00:00:00Z' },
+    ]);
+
+    const entries = service.getViewedHashIndex('repo-1').entries;
+    expect(entries).toHaveLength(2);
+    expect(entries.map((e) => e.diffContentHash).sort()).toEqual(['h1', 'h2']);
   });
 
   it('isolates the index per repositoryId', () => {
@@ -380,15 +387,19 @@ describe('StorageService - Viewed Hash Index', () => {
     expect(service.getViewedHashIndex('repo-2').entries[0]!.diffContentHash).toBe('other');
   });
 
-  it('removes entries by file path', () => {
+  it('removes only the matching (path, hash) entry', () => {
     service.recordViewedHashes('repo-1', [
       { filePath: 'a.ts', diffContentHash: 'h1', hashVersion: 1, viewedAt: '2026-01-01T00:00:00Z' },
-      { filePath: 'b.ts', diffContentHash: 'h2', hashVersion: 1, viewedAt: '2026-01-01T00:00:01Z' },
+      { filePath: 'a.ts', diffContentHash: 'h2', hashVersion: 1, viewedAt: '2026-01-02T00:00:00Z' },
+      { filePath: 'b.ts', diffContentHash: 'h3', hashVersion: 1, viewedAt: '2026-01-03T00:00:00Z' },
     ]);
 
-    service.removeViewedHashes('repo-1', ['a.ts']);
-    const remaining = service.getViewedHashIndex('repo-1').entries.map((e) => e.filePath);
-    expect(remaining).toEqual(['b.ts']);
+    service.removeViewedHashes('repo-1', [{ filePath: 'a.ts', diffContentHash: 'h1' }]);
+    const remaining = service.getViewedHashIndex('repo-1').entries;
+    expect(remaining).toHaveLength(2);
+    const aHashes = remaining.filter((e) => e.filePath === 'a.ts').map((e) => e.diffContentHash);
+    expect(aHashes).toEqual(['h2']);
+    expect(remaining.some((e) => e.filePath === 'b.ts' && e.diffContentHash === 'h3')).toBe(true);
   });
 
   it('clearViewedHashIndex empties only the targeted repository', () => {
